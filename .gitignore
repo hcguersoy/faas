@@ -3,3 +3,7 @@ fwatchdog-armhf
 **/node_modules/
 **/*.DS_Store
 .vscode
+.idea
+certifier
+.editorconfig
+/contrib/staging/

@@ -4,7 +4,9 @@
 
 Default timeouts are configured at the HTTP level and must be set both on the gateway and the function.
 
-**Your function**
+> Note: all distributed systems need a maximum timeout value to be configured for work. This means that work cannot be unbounded.
+
+### Timeouts - Your function
 
 You can also enforce a hard-timeout for your function with the `hard_timeout` environmental variable.
 
@@ -25,8 +27,8 @@ functions:
     handler: ./sleepygo
     image: alexellis2/sleeps-for-10-seconds
     environment:
-        read_timeout: 20
-        write_timeout: 20
+        read_timeout: 20s
+        write_timeout: 20s
 ```
 
 handler.go
@@ -42,23 +44,81 @@ func Handle(req []byte) string {
 }
 ```
 
-**Gateway**
+### Timeouts - Gateway
 
 For the gateway set the following environmental variables:
 
 ```
-read_timeout: 30
-write_timeout: 30
+            read_timeout:  "25s"        # Maximum time to read HTTP request
+            write_timeout: "25s"        # Maximum time to write HTTP response
+            upstream_timeout: "20s"     # Maximum duration of upstream function call
 ```
 
-The default for both is "8" - seconds. In the example above "30" means 30 seconds.
+> Note: The value for `upstream_timeout` should be slightly less than `read_timeout` and `write_timeout`
 
-If on Kubernetes, set a matching timeout for the faas-netesd controller too:
+### Timeouts - Function provider
+
+When using a gateway version older than `0.7.8` a timeout matching the gateway should be set for the `faas-swarm` or `faas-netes` controller.
 
 ```
-read_timeout: 30
-write_timeout: 30
+read_timeout: 25s
+write_timeout: 25s
 ```
+
+### Timeouts - Asynchronous invocations
+
+For asynchronous invocations of functions a separate timeout can be configured at the `queue-worker` level in the `ack_wait` environmental variable.
+
+If the `ack_wait` is exceeded the task will not be acknowledge and the queue system will retry the invocation.
+
+## Function execution logs
+
+By default the functions will not log out the result, but just show how long the process took to run and the length of the result in bytes.
+
+```
+$ echo test this | faas invoke json-hook -g localhost:31112
+Received JSON webook. Elements: 10
+
+$ kubectl logs deploy/json-hook -n openfaas-fn
+2018/01/28 20:47:21 Writing lock-file to: /tmp/.lock
+2018/01/28 20:47:27 Forking fprocess.
+2018/01/28 20:47:27 Wrote 35 Bytes - Duration: 0.001844 seconds
+```
+
+If you want to see the result of a function in the function's logs then deploy it with the `write_debug` environmental variable set to `true`.
+
+For example:
+
+```
+provider:
+  name: faas
+  gateway: http://localhost:8080
+
+functions:
+  json-hook:
+    lang: go
+    handler: ./json-hook
+    image: json-hook
+    environment:
+      write_debug: true
+```
+
+Now you'll see logs like this:
+
+```
+$ echo test this | faas invoke json-hook -g localhost:31112
+Received JSON webook. Elements: 10
+
+$ kubectl logs deploy/json-hook -n openfaas-fn
+2018/01/28 20:50:27 Writing lock-file to: /tmp/.lock
+2018/01/28 20:50:35 Forking fprocess.
+2018/01/28 20:50:35 Query  
+2018/01/28 20:50:35 Path  /function/json-hook
+Received JSON webook. Elements: 10
+2018/01/28 20:50:35 Duration: 0.001857 seconds
+```
+
+You can then find the logs of the function using Docker Swarm or Kubernetes as listed in the section below.
 
 ## Healthcheck
 
@@ -68,6 +128,18 @@ Checklist:
 * [ ] All core services are deployed: i.e. gateway
 * [ ] Check functions are deployed and started
 * [ ] Check request isn't timing out at the gateway or the function level
+
+## CLI unresponsive - localhost vs 127.0.0.1
+
+On certain Linux distributions the name `localhost` maps to an IPv6 alias meaning that the CLI may hang. In these circumstances you have two options:
+
+1. Use the `-g` or `--gateway` argument with `127.0.0.1`
+
+This forces IPv4.
+
+2. Edit the `/etc/hosts` file on your machine and remove the IPv6 alias for localhost.
+
+# Troubleshooting Swarm or Kubernetes
 
 ## Docker Swarm
 
@@ -107,39 +179,43 @@ $ docker service ls -q | xargs docker service rm
 
 ## Kubernetes
 
+If you have deployed OpenFaaS to the recommended namespaces then functions are in the `openfaas-fn` namespace and the core services are in the `openfaas` namespace. The `-n` flag to `kubectl` sets the namespace to look at.
+
+### List OpenFaaS services
+
+```
+$ kubectl get deploy -n openfaas
+```
+
 ### List all functions
 
 ```
-$ kubectl get deploy
+$ kubectl get deploy -n openfaas-fn
 ```
 
 ### Find a function's logs
 
 ```
-$ kubectl logs deploy/FUNCTION
+$ kubectl logs -n openfaas-fn deploy/FUNCTION_NAME
 ```
 
 ### Find out if a function failed to start
 
 ```
-$ kubectl describe deploy/FUNCTION
+$ kubectl describe -n openfaas-fn deploy/FUNCTION_NAME
 ```
 
 ### Remove the OpenFaaS deployment
 
-```
-$ kubectl delete -f faas.yml,monitoring.yml,rbac.yml
-```
-
-If you're using the async stack remove it this way:
+From within the `faas-netes` folder:
 
 ```
-$ kubectl delete -f faas.async.yml,monitoring.yml,rbac.yml,nats.yml
+$ kubectl delete -f namespaces.yml,./yaml/
 ```
 
-## Watchdog
+# Watchdog
 
-### Debug your function without deploying it
+## Debug your function without deploying it
 
 Here's an example of how you can deploy a function without using an orchestrator and the API gateeway. It is especially useful for testing:
 
@@ -155,7 +231,7 @@ Now you can access the function with one of the supported HTTP methods such as G
 $ curl -4 localhost:8081
 ```
 
-### Edit your function without rebuilding it
+## Edit your function without rebuilding it
 
 You can bind-mount code straight into your function and work with it locally, until you are ready to re-build. This is a common flow with containers, but should be used sparingly.
 

@@ -9,14 +9,13 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/gorilla/mux"
 	"github.com/openfaas/faas/gateway/metrics"
 	"github.com/openfaas/faas/gateway/queue"
 )
 
 // MakeQueuedProxy accepts work onto a queue
-func MakeQueuedProxy(metrics metrics.MetricOptions, wildcard bool, logger *logrus.Logger, canQueueRequests queue.CanQueueRequests) http.HandlerFunc {
+func MakeQueuedProxy(metrics metrics.MetricOptions, wildcard bool, canQueueRequests queue.CanQueueRequests, pathTransformer URLPathTransformer) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 
@@ -44,23 +43,27 @@ func MakeQueuedProxy(metrics metrics.MetricOptions, wildcard bool, logger *logru
 
 			callbackURL = urlVal
 		}
+
 		req := &queue.Request{
 			Function:    name,
 			Body:        body,
 			Method:      r.Method,
 			QueryString: r.URL.RawQuery,
+			Path:        pathTransformer.Transform(r),
 			Header:      r.Header,
+			Host:        r.Host,
 			CallbackURL: callbackURL,
 		}
 
 		err = canQueueRequests.Queue(req)
+
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(err.Error()))
 			fmt.Println(err)
 			return
 		}
-		w.WriteHeader(http.StatusAccepted)
 
+		w.WriteHeader(http.StatusAccepted)
 	}
 }

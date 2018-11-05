@@ -4,9 +4,12 @@
 
 var app = angular.module('faasGateway', ['ngMaterial', 'faasGateway.funcStore']);
 
-app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$mdDialog', '$mdToast', '$mdSidenav',
-    function($scope, $log, $http, $location, $timeout, $mdDialog, $mdToast, $mdSidenav) {
-        var newFuncTabIdx = 0;
+app.controller("home", ['$scope', '$log', '$http', '$location', '$interval', '$filter', '$mdDialog', '$mdToast', '$mdSidenav',
+    function($scope, $log, $http, $location, $interval, $filter, $mdDialog, $mdToast, $mdSidenav) {
+        var FUNCSTORE_DEPLOY_TAB_INDEX = 0;
+        var MANUAL_DEPLOY_TAB_INDEX = 1;
+
+        var newFuncTabIdx = FUNCSTORE_DEPLOY_TAB_INDEX;
         $scope.functions = [];
         $scope.invocationInProgress = false;
         $scope.invocationRequest = "";
@@ -18,6 +21,25 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
             contentType: "text"
         };
 
+        $scope.baseUrl = $location.absUrl().replace(/\ui\/$/, '');
+        try {
+            $scope.canCopyToClipboard = document.queryCommandSupported('copy');
+        } catch (err) {
+            console.error(err);
+            $scope.canCopyToClipboard = false;
+        }
+        $scope.copyClicked = function(e) {
+            e.target.parentElement.querySelector('input').select()
+            var copySuccessful = false;
+            try {
+                copySuccessful = document.execCommand('copy');
+            } catch (err) {
+                console.error(err);
+            }
+            var msg = copySuccessful ? 'Copied to Clipboard' : 'Copy failed. Please copy it manually';
+            showPostInvokedToast(msg);
+        }
+
         $scope.toggleSideNav = function() {
             $mdSidenav('left').toggle();
         };
@@ -26,14 +48,34 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
             image: "",
             envProcess: "",
             network: "",
-            service: ""
+            service: "",
+            envVars: {},
+            labels: {}
         };
 
         $scope.invocation.request = "";
-
-        setInterval(function() {
+        var fetchFunctionsDelay = 3500;
+        var queryFunctionDelay = 2500;
+        
+        var fetchFunctionsInterval = $interval(function() {
             refreshData();
-        }, 1000);
+        }, fetchFunctionsDelay);
+
+        var queryFunctionInterval = $interval(function() {
+            if($scope.selectedFunction && $scope.selectedFunction.name) {
+                refreshFunction($scope.selectedFunction);
+            }
+        }, queryFunctionDelay);
+
+        var refreshFunction = function(functionInstance) {
+            $http.get("../system/function/" + functionInstance.name)
+            .then(function(response) {
+                functionInstance.ready = (response.data && response.data.availableReplicas && response.data.availableReplicas > 0);
+            })
+            .catch(function(err) {
+                console.error(err);
+            });
+        };
 
         var showPostInvokedToast = function(message, duration) {
             $mdToast.show(
@@ -45,28 +87,84 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
         };
 
         $scope.fireRequest = function() {
+            var requestContentType = $scope.invocation.contentType == "json" ? "application/json" : "text/plain";
+            if ($scope.invocation.contentType == "binary") {
+                requestContentType = "binary/octet-stream";
+            }
+
             var options = {
-                url: "/function/" + $scope.selectedFunction.name,
+                url: "../function/" + $scope.selectedFunction.name,
                 data: $scope.invocation.request,
                 method: "POST",
-                headers: { "Content-Type": $scope.invocation.contentType == "json" ? "application/json" : "text/plain" },
-                responseType: $scope.invocation.contentType
+                headers: { "Content-Type": requestContentType },
+                responseType: $scope.invocation.contentType == "binary" ? "arraybuffer" : $scope.invocation.contentType
             };
+            
             $scope.invocationInProgress = true;
             $scope.invocationResponse = "";
             $scope.invocationStatus = null;
             $scope.roundTripDuration = "";
             $scope.invocationStart = new Date().getTime()
 
-            $http(options)
-                .then(function(response) {
-                    if (typeof response.data == 'object') {
-                        $scope.invocationResponse = JSON.stringify(response.data, null, 2);
-                    } else {
-                        $scope.invocationResponse = response.data;
+
+            var tryDownload = function(data, filename) {
+                var caught;
+            
+                try {
+                    var blob = new Blob([data], { type: "binary/octet-stream" });
+            
+                    if (window.navigator.msSaveBlob) { // // IE hack; see http://msdn.microsoft.com/en-us/library/ie/hh779016.aspx
+                        window.navigator.msSaveOrOpenBlob(blob, filename);
                     }
+                    else {
+                        var linkElement = window.document.createElement("a");
+                        linkElement.href = window.URL.createObjectURL(blob);
+                        linkElement.download = filename;
+                        document.body.appendChild(linkElement);
+                        linkElement.click();
+                        document.body.removeChild(linkElement);
+                    }
+            
+                } catch (ex) {
+                    caught = ex;
+                }
+                return caught;
+            }
+
+            $http(options)
+                .then(function (response) {
+                    var data = response.data;
+                    var status = response.status;
+
+                    if($scope.invocation.contentType == "binary") {
+                        var filename = uuidv4();
+
+                        if($scope.selectedFunction.labels) {
+                            var ext = $scope.selectedFunction.labels["com.openfaas.ui.ext"];
+                            if(ext && ext.length > 0 ) {
+                                filename = filename + "." + ext;
+                            }
+                        }
+
+                        var caught = tryDownload(data, filename);
+                        if(caught) {
+                            console.log(caught);                         
+                            $scope.invocationResponse = caught
+                        } else {
+                            $scope.invocationResponse = data.byteLength + " byte(s) received";
+                        }
+
+                    } else {
+
+                        if (typeof data == 'object') {
+                            $scope.invocationResponse = JSON.stringify(data, null, 2);
+                        } else {
+                            $scope.invocationResponse = data;
+                        }
+                    }
+
                     $scope.invocationInProgress = false;
-                    $scope.invocationStatus = response.status;
+                    $scope.invocationStatus = status;
                     var now = new Date().getTime();
                     $scope.roundTripDuration = (now - $scope.invocationStart) / 1000;
                     showPostInvokedToast("Success");
@@ -86,10 +184,18 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
             var previous = $scope.functions;
 
             var cl = function(previousItems) {
-                $http.get("/system/functions").then(function(response) {
+                $http.get("../system/functions").then(function(response) {
                     if (response && response.data) {
                         if (previousItems.length != response.data.length) {
                             $scope.functions = response.data;
+                            
+                            // update the selected function object because the newly fetched object from the API becomes a different object
+                            var filteredSelectedFunction = $filter('filter')($scope.functions, {name: $scope.selectedFunction.name}, true);
+                            if (filteredSelectedFunction && filteredSelectedFunction.length > 0) {
+                                $scope.selectedFunction = filteredSelectedFunction[0];
+                            } else {
+                                $scope.selectedFunction = undefined;
+                            }
                         } else {
                             for (var i = 0; i < $scope.functions.length; i++) {
                                 for (var j = 0; j < response.data.length; j++) {
@@ -107,7 +213,7 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
         }
 
         var fetch = function() {
-            $http.get("/system/functions").then(function(response) {
+            $http.get("../system/functions").then(function(response) {
                 $scope.functions = response.data;
             });
         };
@@ -119,7 +225,11 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
                 $scope.invocationResponse = "";
                 $scope.invocationStatus = "";
                 $scope.invocationInProgress = false;
-                $scope.invocation.contentType = "text";
+                if (fn.labels && fn.labels['com.openfaas.ui.ext']) {
+                  $scope.invocation.contentType = "binary";
+                } else {
+                  $scope.invocation.contentType = "text";
+                }
                 $scope.invocation.roundTripDuration = "";
             }
         };
@@ -150,6 +260,9 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
                 $scope.item.service = func.name;
                 $scope.item.envProcess = func.fprocess;
                 $scope.item.network = func.network;
+                $scope.item.envVars = func.environment;
+                $scope.item.labels = func.labels;
+
                 $scope.selectedFunc = func;
             }
             
@@ -167,7 +280,7 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
 
             $scope.createFunc = function() {
                 var options = {
-                    url: "/system/functions",
+                    url: "../system/functions",
                     data: $scope.item,
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -180,10 +293,15 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
                         item.service = "";
                         item.envProcess = "";
                         item.network = "";
+                        item.envVars = {};
+                        item.labels = {};
+
                         $scope.validationError = "";
                         $scope.closeDialog();
                         showPostInvokedToast("Function created");
                     }).catch(function(error1) {
+                        showPostInvokedToast("Error");
+                        $scope.selectedTabIdx = MANUAL_DEPLOY_TAB_INDEX;
                         $scope.validationError = error1.data;
                     });
             };
@@ -205,7 +323,7 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
             $mdDialog.show(confirm)
                 .then(function() {
                     var options = {
-                        url: "/system/functions",
+                        url: "../system/functions",
                         data: {
                             functionName: $scope.selectedFunction.name
                         },
@@ -229,3 +347,10 @@ app.controller("home", ['$scope', '$log', '$http', '$location', '$timeout', '$md
         fetch();
     }
 ]);
+
+function uuidv4() {
+    var cryptoInstance = window.crypto || window.msCrypto; // for IE11
+    return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, function(c) {
+        return (c ^ cryptoInstance.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+    })
+}  

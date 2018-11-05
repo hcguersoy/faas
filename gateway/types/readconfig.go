@@ -36,28 +36,33 @@ func parseBoolValue(val string) bool {
 	return false
 }
 
-func parseIntValue(val string, fallback int) int {
+func parseIntOrDurationValue(val string, fallback time.Duration) time.Duration {
 	if len(val) > 0 {
 		parsedVal, parseErr := strconv.Atoi(val)
 		if parseErr == nil && parsedVal >= 0 {
-			return parsedVal
+			return time.Duration(parsedVal) * time.Second
 		}
 	}
-	return fallback
+
+	duration, durationErr := time.ParseDuration(val)
+	if durationErr != nil {
+		return fallback
+	}
+	return duration
 }
 
-// Read fetches config from environmental variables.
+// Read fetches gateway server configuration from environmental variables
 func (ReadConfig) Read(hasEnv HasEnv) GatewayConfig {
 	cfg := GatewayConfig{
 		PrometheusHost: "prometheus",
 		PrometheusPort: 9090,
 	}
 
-	readTimeout := parseIntValue(hasEnv.Getenv("read_timeout"), 8)
-	writeTimeout := parseIntValue(hasEnv.Getenv("write_timeout"), 8)
+	defaultDuration := time.Second * 8
 
-	cfg.ReadTimeout = time.Duration(readTimeout) * time.Second
-	cfg.WriteTimeout = time.Duration(writeTimeout) * time.Second
+	cfg.ReadTimeout = parseIntOrDurationValue(hasEnv.Getenv("read_timeout"), defaultDuration)
+	cfg.WriteTimeout = parseIntOrDurationValue(hasEnv.Getenv("write_timeout"), defaultDuration)
+	cfg.UpstreamTimeout = parseIntOrDurationValue(hasEnv.Getenv("upstream_timeout"), defaultDuration)
 
 	if len(hasEnv.Getenv("functions_provider_url")) > 0 {
 		var err error
@@ -97,10 +102,22 @@ func (ReadConfig) Read(hasEnv HasEnv) GatewayConfig {
 		cfg.PrometheusHost = prometheusHost
 	}
 
+	cfg.DirectFunctions = parseBoolValue(hasEnv.Getenv("direct_functions"))
+	cfg.DirectFunctionsSuffix = hasEnv.Getenv("direct_functions_suffix")
+
+	cfg.UseBasicAuth = parseBoolValue(hasEnv.Getenv("basic_auth"))
+
+	secretPath := hasEnv.Getenv("secret_mount_path")
+	if len(secretPath) == 0 {
+		secretPath = "/run/secrets/"
+	}
+	cfg.SecretMountPath = secretPath
+	cfg.ScaleFromZero = parseBoolValue(hasEnv.Getenv("scale_from_zero"))
+
 	return cfg
 }
 
-// GatewayConfig for the process.
+// GatewayConfig provides config for the API Gateway server process
 type GatewayConfig struct {
 
 	// HTTP timeout for reading a request from clients.
@@ -108,6 +125,9 @@ type GatewayConfig struct {
 
 	// HTTP timeout for writing a response from functions.
 	WriteTimeout time.Duration
+
+	// UpstreamTimeout maximum duration of HTTP call to upstream URL
+	UpstreamTimeout time.Duration
 
 	// URL for alternate functions provider.
 	FunctionsProviderURL *url.URL
@@ -123,6 +143,20 @@ type GatewayConfig struct {
 
 	// Port to connect to Prometheus.
 	PrometheusPort int
+
+	// If set to true we will access upstream functions directly rather than through the upstream provider
+	DirectFunctions bool
+
+	// If set this will be used to resolve functions directly
+	DirectFunctionsSuffix string
+
+	// If set, reads secrets from file-system for enabling basic auth.
+	UseBasicAuth bool
+
+	// SecretMountPath specifies where to read secrets from for embedded basic auth
+	SecretMountPath string
+	// Enable the gateway to scale any service from 0 replicas to its configured "min replicas"
+	ScaleFromZero bool
 }
 
 // UseNATS Use NATSor not
